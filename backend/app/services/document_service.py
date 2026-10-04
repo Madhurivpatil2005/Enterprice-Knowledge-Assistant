@@ -51,9 +51,11 @@ def upload_document(
 
     # Extract Text
     text = extract_document_text(file_path)
+    print("Extracted characters:", len(text))
 
     # Chunk Text
     chunks = chunk_text(text)
+    print("Generated chunks:", len(chunks))
 
     # Create MongoDB Document
     document = create_document(

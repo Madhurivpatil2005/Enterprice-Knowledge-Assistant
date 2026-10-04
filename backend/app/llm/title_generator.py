@@ -1,5 +1,5 @@
-from app.llm.gemini_client import ask_gemini
-
+# from app.llm.gemini_client import ask_gemini
+from app.llm.gemini_client import ask_ollama
 
 def generate_title(question: str) -> str:
 
@@ -18,6 +18,6 @@ Question:
 Title:
 """
 
-    title = ask_gemini(prompt)
+    title = ask_ollama(prompt)
 
     return title.strip()

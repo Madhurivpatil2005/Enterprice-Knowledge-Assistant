@@ -4,6 +4,15 @@ from fastapi import (
     HTTPException,
 )
 
+from app.services.admin_service import (
+    get_all_users,
+    get_user_details,
+    promote_user,
+    demote_user,
+    delete_user,
+)
+
+
 from app.auth.dependencies import require_admin
 
 from app.schemas.admin_schema import (
@@ -29,6 +38,11 @@ from app.services.analytics_service import (
     get_analytics_overview,
     get_usage_analytics,
     get_activity_analytics,
+)
+from app.services.analytics_service import (
+    get_user_analytics,
+    get_user_activity,
+    get_user_documents,
 )
 
 
@@ -148,6 +162,45 @@ def demote(
 
 
 # ==================================================
+# DELETE USER
+# ==================================================
+
+@router.delete(
+    "/users/{email}",
+)
+def delete(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    # Prevent admin from deleting
+    # their own account.
+
+    if email.lower() == current_admin["email"].lower():
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot delete your own account",
+        )
+
+    deleted = delete_user(
+        email=email,
+        admin_email=current_admin["email"],
+    )
+
+    if deleted is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return {
+        "message": "User deleted successfully",
+        "email": email,
+    }
+
+# ==================================================
 # AUDIT LOGS
 # ==================================================
 
@@ -213,3 +266,176 @@ def analytics_activity(
 ):
 
     return get_activity_analytics()
+
+
+# ==================================================
+# USER ANALYTICS
+# ==================================================
+
+@router.get(
+    "/users/{email}/analytics"
+)
+def user_analytics(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_analytics(
+        email
+    )
+
+
+# ==================================================
+# USER ACTIVITY
+# ==================================================
+
+@router.get(
+    "/users/{email}/activity"
+)
+def user_activity(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_activity(
+        email
+    )
+
+
+# ==================================================
+# USER DOCUMENTS
+# ==================================================
+
+@router.get(
+    "/users/{email}/documents"
+)
+def user_documents(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_documents(
+        email
+    )
+
+# ==================================================
+# INDIVIDUAL USER ANALYTICS
+# ==================================================
+
+@router.get(
+    "/users/{email}/analytics"
+)
+def user_analytics(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_analytics(
+        email
+    )
+
+
+# ==================================================
+# INDIVIDUAL USER ACTIVITY
+# ==================================================
+
+@router.get(
+    "/users/{email}/activity"
+)
+def user_activity(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_activity(
+        email
+    )
+
+
+# ==================================================
+# INDIVIDUAL USER DOCUMENTS
+# ==================================================
+
+@router.get(
+    "/users/{email}/documents"
+)
+def user_documents(
+    email: str,
+    current_admin: dict = Depends(
+        require_admin
+    ),
+):
+
+    user = get_user_details(
+        email
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return get_user_documents(
+        email
+    )

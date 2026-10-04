@@ -2,8 +2,7 @@ from bson import ObjectId
 
 from app.core.database import db
 from app.vectorstore.chroma_client import collection
-from app.llm.gemini_client import ask_gemini
-
+from app.llm.gemini_client import ask_ollama
 from app.services.audit_service import record_audit_log
 
 
@@ -11,34 +10,22 @@ documents_collection = db["documents"]
 
 
 # ==================================================
-# Get Document Content
+# HELPER: GET DOCUMENT CONTENT
 # ==================================================
 
 def get_document_content(
     document_id: str,
     current_user: dict,
 ):
-    """
-    Get document metadata from MongoDB
-    and all document chunks from ChromaDB.
-    """
 
-    # ------------------------------------------
-    # Validate ObjectId
-    # ------------------------------------------
-
-    try:
-        object_id = ObjectId(document_id)
-    except Exception:
+    # Validate MongoDB ObjectId
+    if not ObjectId.is_valid(document_id):
         return None
 
-    # ------------------------------------------
-    # Find document in MongoDB
-    # ------------------------------------------
-
+    # Find document belonging to current user
     document = documents_collection.find_one(
         {
-            "_id": object_id,
+            "_id": ObjectId(document_id),
             "user_email": current_user["email"],
         }
     )
@@ -46,28 +33,26 @@ def get_document_content(
     if document is None:
         return None
 
-    # ------------------------------------------
-    # Get all chunks from ChromaDB
-    # ------------------------------------------
+    # Get document chunks from ChromaDB
+    try:
+        results = collection.get(
+            where={
+                "$and": [
+                    {"document_id": document_id},
+                    {"user_email": current_user["email"]},
+                ]
+            }
+        )
+    except Exception as e:
+        print("ChromaDB document retrieval error:", e)
 
-    results = collection.get(
-        where={
-            "$and": [
-                {
-                    "document_id": document_id
-                },
-                {
-                    "user_email": current_user["email"]
-                }
-            ]
+        return {
+            "document_id": document_id,
+            "filename": document["filename"],
+            "text": "",
         }
-    )
 
     chunks = results.get("documents", [])
-
-    # ------------------------------------------
-    # No chunks available
-    # ------------------------------------------
 
     if not chunks:
         return {
@@ -76,17 +61,31 @@ def get_document_content(
             "text": "",
         }
 
-    # ------------------------------------------
-    # Combine chunks
-    # ------------------------------------------
-
-    document_text = "\n\n".join(chunks)
+    # Join all document chunks
+    document_text = "\n\n".join(
+        chunk for chunk in chunks if chunk
+    )
 
     return {
         "document_id": document_id,
         "filename": document["filename"],
         "text": document_text,
     }
+
+
+# ==================================================
+# HELPER: CLEAN MARKDOWN
+# ==================================================
+
+def clean_ai_line(line: str) -> str:
+
+    line = line.strip()
+
+    # Remove common markdown formatting
+    line = line.replace("**", "")
+    line = line.replace("__", "")
+
+    return line.strip()
 
 
 # ==================================================
@@ -103,27 +102,17 @@ def generate_document_summary(
         current_user=current_user,
     )
 
-    # ------------------------------------------
-    # Document not found
-    # ------------------------------------------
-
     if document is None:
         return None
-
-    # ------------------------------------------
-    # No readable content
-    # ------------------------------------------
 
     if not document["text"]:
         return {
             "document_id": document_id,
             "filename": document["filename"],
-            "summary": "No readable content was found in this document.",
+            "summary": (
+                "No readable content was found in this document."
+            ),
         }
-
-    # ------------------------------------------
-    # Summary Prompt
-    # ------------------------------------------
 
     prompt = f"""
 You are an Enterprise Knowledge Assistant.
@@ -135,8 +124,8 @@ Rules:
 - Do not invent information.
 - Keep important facts, names, dates, skills,
   technologies, projects, and other important details.
-- Organize the summary with headings and bullet points
-  when appropriate.
+- Organize the summary clearly.
+- Use bullet points when appropriate.
 - Make the summary easy to read.
 - Do not mention that you are an AI.
 
@@ -147,15 +136,7 @@ Document:
 Summary:
 """
 
-    # ------------------------------------------
-    # Generate Summary
-    # ------------------------------------------
-
-    summary = ask_gemini(prompt)
-
-    # ------------------------------------------
-    # Audit Log
-    # ------------------------------------------
+    summary = ask_ollama(prompt)
 
     record_audit_log(
         user_email=current_user["email"],
@@ -195,10 +176,6 @@ def generate_document_keywords(
             "keywords": [],
         }
 
-    # ------------------------------------------
-    # Keyword Prompt
-    # ------------------------------------------
-
     prompt = f"""
 You are an Enterprise Knowledge Assistant.
 
@@ -207,13 +184,14 @@ from the document below.
 
 Rules:
 - Use ONLY the document content.
-- Return 10 to 20 important keywords.
+- Return exactly 15 important keywords.
 - Include important skills, technologies, tools,
   concepts, projects, organizations, and domain terms.
 - Do not explain the keywords.
-- Do not invent keywords that are not supported
-  by the document.
+- Do not repeat keywords.
+- Do not invent information.
 - Return ONLY a comma-separated list.
+- Do not number the keywords.
 
 Document:
 
@@ -222,11 +200,7 @@ Document:
 Keywords:
 """
 
-    result = ask_gemini(prompt)
-
-    # ------------------------------------------
-    # Audit Log
-    # ------------------------------------------
+    result = ask_ollama(prompt)
 
     record_audit_log(
         user_email=current_user["email"],
@@ -235,18 +209,38 @@ Keywords:
         resource_id=document_id,
     )
 
-    # ------------------------------------------
-    # Convert response to list
-    # ------------------------------------------
-
     keywords = []
+    seen = set()
 
-    for keyword in result.split(","):
+    # Handle comma separated output
+    raw_keywords = result.replace("\n", ",").split(",")
 
-        keyword = keyword.strip()
+    for keyword in raw_keywords:
 
-        if keyword:
+        keyword = clean_ai_line(keyword)
+
+        # Remove bullets
+        keyword = keyword.lstrip("-*•").strip()
+
+        # Remove simple numbering
+        if ". " in keyword:
+            first_part = keyword.split(". ", 1)[0]
+
+            if first_part.isdigit():
+                keyword = keyword.split(". ", 1)[1].strip()
+
+        if not keyword:
+            continue
+
+        key = keyword.lower()
+
+        if key not in seen:
+
+            seen.add(key)
             keywords.append(keyword)
+
+        if len(keywords) >= 15:
+            break
 
     return {
         "document_id": document_id,
@@ -286,18 +280,32 @@ def generate_document_key_points(
     prompt = f"""
 You are an Enterprise Knowledge Assistant.
 
-Extract the most important points from the document.
+Extract the 8 most important points from the document.
 
-Rules:
-- Use ONLY the document.
-- Do not invent information.
-- Return 8 to 15 important points.
-- Each point must be concise.
-- Focus on important facts, achievements,
-  projects, skills, technologies, dates,
-  responsibilities, and conclusions.
-- Return one point per line.
-- Do not number the points.
+IMPORTANT OUTPUT RULES:
+
+1. Return EXACTLY 8 points.
+2. Each point MUST be on a separate line.
+3. Start every point with POINT 1:, POINT 2:, etc.
+4. Each point must contain only ONE important fact.
+5. Keep each point short and complete.
+6. Do not combine multiple facts into one point.
+7. Do not write an introduction.
+8. Do not write a conclusion.
+9. Do not use paragraphs.
+10. Use ONLY information from the document.
+11. Do not invent information.
+
+Use EXACTLY this format:
+
+POINT 1: ...
+POINT 2: ...
+POINT 3: ...
+POINT 4: ...
+POINT 5: ...
+POINT 6: ...
+POINT 7: ...
+POINT 8: ...
 
 Document:
 
@@ -306,7 +314,7 @@ Document:
 Key Points:
 """
 
-    result = ask_gemini(prompt)
+    result = ask_ollama(prompt)
 
     # ------------------------------------------
     # Audit Log
@@ -320,32 +328,79 @@ Key Points:
     )
 
     # ------------------------------------------
-    # Convert response to list
+    # Parse Key Points
     # ------------------------------------------
 
     key_points = []
+    seen = set()
 
     for line in result.splitlines():
 
-        line = line.strip()
+        line = clean_ai_line(line)
 
         if not line:
             continue
 
-        if line.startswith("-"):
-            line = line[1:].strip()
+        upper_line = line.upper()
 
-        if line.startswith("*"):
-            line = line[1:].strip()
+        # Accept:
+        # POINT 1: ...
+        # POINT 2: ...
+        if upper_line.startswith("POINT"):
 
-        key_points.append(line)
+            if ":" in line:
+                line = line.split(
+                    ":",
+                    1
+                )[1].strip()
+
+        # Also handle bullets if Ollama adds them
+        line = line.lstrip("-*•").strip()
+
+        if not line:
+            continue
+
+        # Remove accidental numbering
+        # Example:
+        # 1. Python
+        # 2. Java
+
+        if ". " in line:
+
+            first_part = line.split(
+                ". ",
+                1
+            )[0]
+
+            if first_part.isdigit():
+
+                line = line.split(
+                    ". ",
+                    1
+                )[1].strip()
+
+        if not line:
+            continue
+
+        key = line.lower()
+
+        if key not in seen:
+
+            seen.add(key)
+            key_points.append(line)
+
+        if len(key_points) >= 8:
+            break
+
+    # ------------------------------------------
+    # Return Result
+    # ------------------------------------------
 
     return {
         "document_id": document_id,
         "filename": document["filename"],
         "key_points": key_points,
     }
-
 
 # ==================================================
 # 4. FAQ GENERATOR
@@ -371,10 +426,6 @@ def generate_document_faqs(
             "faqs": [],
         }
 
-    # ------------------------------------------
-    # FAQ Prompt
-    # ------------------------------------------
-
     prompt = f"""
 You are an Enterprise Knowledge Assistant.
 
@@ -382,14 +433,23 @@ Create frequently asked questions based ONLY
 on the document below.
 
 Rules:
-- Create 8 to 10 useful FAQs.
+- Create exactly 8 useful FAQs.
 - Use only information present in the document.
 - Do not invent information.
-- Keep answers concise.
-- Use exactly this format:
+- Keep each answer concise and complete.
+- Each answer should be about 1 to 2 sentences.
+- Do not repeat questions.
+
+Use EXACTLY this format:
 
 QUESTION: ...
 ANSWER: ...
+
+QUESTION: ...
+ANSWER: ...
+
+Continue until exactly 8 complete question-answer
+pairs have been generated.
 
 Document:
 
@@ -398,11 +458,7 @@ Document:
 FAQs:
 """
 
-    result = ask_gemini(prompt)
-
-    # ------------------------------------------
-    # Audit Log
-    # ------------------------------------------
+    result = ask_ollama(prompt)
 
     record_audit_log(
         user_email=current_user["email"],
@@ -411,10 +467,6 @@ FAQs:
         resource_id=document_id,
     )
 
-    # ------------------------------------------
-    # Parse FAQs
-    # ------------------------------------------
-
     faqs = []
 
     current_question = None
@@ -422,12 +474,16 @@ FAQs:
 
     for line in result.splitlines():
 
-        line = line.strip()
+        line = clean_ai_line(line)
 
         if not line:
             continue
 
         upper_line = line.upper()
+
+        # ------------------------------------------
+        # Question
+        # ------------------------------------------
 
         if upper_line.startswith("QUESTION:"):
 
@@ -436,6 +492,12 @@ FAQs:
                 1
             )[1].strip()
 
+            current_answer = None
+
+        # ------------------------------------------
+        # Answer
+        # ------------------------------------------
+
         elif upper_line.startswith("ANSWER:"):
 
             current_answer = line.split(
@@ -443,7 +505,7 @@ FAQs:
                 1
             )[1].strip()
 
-            if current_question:
+            if current_question and current_answer:
 
                 faqs.append(
                     {
@@ -455,10 +517,26 @@ FAQs:
                 current_question = None
                 current_answer = None
 
+        if len(faqs) >= 8:
+            break
+
+    # Remove duplicate FAQs
+    unique_faqs = []
+    seen = set()
+
+    for faq in faqs:
+
+        key = faq["question"].lower().strip()
+
+        if key not in seen:
+
+            seen.add(key)
+            unique_faqs.append(faq)
+
     return {
         "document_id": document_id,
         "filename": document["filename"],
-        "faqs": faqs,
+        "faqs": unique_faqs[:8],
     }
 
 
@@ -497,16 +575,33 @@ Analyze the document and create interview questions
 based ONLY on its content.
 
 Rules:
-- Create 10 interview questions.
+- Create exactly 8 interview questions.
 - Cover projects, skills, technologies,
   education, experience, and important claims.
-- Include technical and project-based questions.
-- Provide a short expected answer for every question.
+- Include technical questions.
+- Include project-based questions.
+- Provide a complete expected answer for every question.
+- Each expected answer must be concise.
+- Each expected answer should be about 1 to 2 sentences.
 - Do not invent information.
-- Use exactly this format:
+- Do not repeat questions.
+- Complete every answer.
+- Do not stop an answer midway.
+- Return exactly 8 complete question-answer pairs.
 
-QUESTION: ...
-EXPECTED ANSWER: ...
+You MUST use exactly this format:
+
+QUESTION: What is ...?
+EXPECTED ANSWER: Complete answer here.
+
+QUESTION: How did ...?
+EXPECTED ANSWER: Complete answer here.
+
+Do NOT use numbering.
+Do NOT use bullet points.
+Do NOT add headings between questions.
+Do NOT use "Answer:".
+Use "EXPECTED ANSWER:" exactly.
 
 Document:
 
@@ -515,7 +610,16 @@ Document:
 Interview Questions:
 """
 
-    result = ask_gemini(prompt)
+    result = ask_ollama(prompt)
+
+    # Debugging output
+    print("\n")
+    print("==========================================")
+    print("INTERVIEW AI RAW RESPONSE")
+    print("==========================================")
+    print(result)
+    print("==========================================")
+    print("\n")
 
     # ------------------------------------------
     # Audit Log
@@ -539,28 +643,71 @@ Interview Questions:
 
     for line in result.splitlines():
 
-        line = line.strip()
+        line = clean_ai_line(line)
 
         if not line:
             continue
 
+        # Remove common bullet characters
+        line = line.lstrip("-*•").strip()
+
+        # Remove numbering:
+        # 1. QUESTION:
+        # 2. QUESTION:
+
+        if ". " in line:
+
+            first_part = line.split(
+                ". ",
+                1
+            )[0]
+
+            if first_part.isdigit():
+
+                line = line.split(
+                    ". ",
+                    1
+                )[1].strip()
+
         upper_line = line.upper()
 
+        # ------------------------------------------
+        # Detect Question
+        # ------------------------------------------
+
         if upper_line.startswith("QUESTION:"):
+
+            # Save previous complete pair
+            if current_question and current_answer:
+
+                questions.append(
+                    {
+                        "question": current_question,
+                        "expected_answer": current_answer,
+                    }
+                )
 
             current_question = line.split(
                 ":",
                 1
             )[1].strip()
 
-        elif upper_line.startswith("EXPECTED ANSWER:"):
+            current_answer = None
+
+        # ------------------------------------------
+        # Detect Expected Answer
+        # ------------------------------------------
+
+        elif upper_line.startswith(
+            "EXPECTED ANSWER:"
+        ):
 
             current_answer = line.split(
                 ":",
                 1
             )[1].strip()
 
-            if current_question:
+            if current_question and current_answer:
 
                 questions.append(
                     {
@@ -572,10 +719,81 @@ Interview Questions:
                 current_question = None
                 current_answer = None
 
+        # ------------------------------------------
+        # Also accept "ANSWER:"
+        # ------------------------------------------
+
+        elif upper_line.startswith("ANSWER:"):
+
+            current_answer = line.split(
+                ":",
+                1
+            )[1].strip()
+
+            if current_question and current_answer:
+
+                questions.append(
+                    {
+                        "question": current_question,
+                        "expected_answer": current_answer,
+                    }
+                )
+
+                current_question = None
+                current_answer = None
+
+        if len(questions) >= 8:
+            break
+
+    # ------------------------------------------
+    # Remove Duplicate Questions
+    # ------------------------------------------
+
+    unique_questions = []
+
+    seen = set()
+
+    for item in questions:
+
+        question_text = item[
+            "question"
+        ].strip()
+
+        answer_text = item[
+            "expected_answer"
+        ].strip()
+
+        if not question_text:
+            continue
+
+        if not answer_text:
+            continue
+
+        key = question_text.lower()
+
+        if key not in seen:
+
+            seen.add(key)
+
+            unique_questions.append(
+                {
+                    "question": question_text,
+                    "expected_answer": answer_text,
+                }
+            )
+
+        if len(unique_questions) >= 8:
+            break
+
+    print(
+        "Interview questions parsed:",
+        len(unique_questions)
+    )
+
     return {
         "document_id": document_id,
         "filename": document["filename"],
-        "questions": questions,
+        "questions": unique_questions,
     }
 
 
@@ -603,10 +821,6 @@ def generate_suggested_questions(
             "questions": [],
         }
 
-    # ------------------------------------------
-    # Suggested Questions Prompt
-    # ------------------------------------------
-
     prompt = f"""
 You are an Enterprise Knowledge Assistant.
 
@@ -615,13 +829,15 @@ about the document.
 
 Rules:
 - Use ONLY the document.
-- Generate 10 useful questions.
+- Generate exactly 10 useful questions.
 - Cover different aspects of the document.
 - Do not answer the questions.
+- Do not repeat questions.
 - Do not invent topics that are not supported
   by the document.
-- Return one question per line.
+- Return exactly one question per line.
 - Do not number the questions.
+- Do not add headings.
 
 Document:
 
@@ -630,11 +846,7 @@ Document:
 Suggested Questions:
 """
 
-    result = ask_gemini(prompt)
-
-    # ------------------------------------------
-    # Audit Log
-    # ------------------------------------------
+    result = ask_ollama(prompt)
 
     record_audit_log(
         user_email=current_user["email"],
@@ -643,36 +855,47 @@ Suggested Questions:
         resource_id=document_id,
     )
 
-    # ------------------------------------------
-    # Convert response to list
-    # ------------------------------------------
-
     questions = []
+
+    seen = set()
 
     for line in result.splitlines():
 
-        line = line.strip()
+        line = clean_ai_line(line)
 
         if not line:
             continue
 
-        if line.startswith("-"):
-            line = line[1:].strip()
+        # Remove bullet characters
+        line = line.lstrip("-*•").strip()
 
-        elif line.startswith("*"):
-            line = line[1:].strip()
+        # Remove numbering
+        if ". " in line:
 
-        # Remove simple numbering such as:
-        # 1. Question
-        # 2. Question
+            first_part = line.split(
+                ". ",
+                1
+            )[0]
 
-        if len(line) >= 3:
+            if first_part.isdigit():
 
-            if line[0].isdigit() and line[1] == ".":
-                line = line[2:].strip()
+                line = line.split(
+                    ". ",
+                    1
+                )[1].strip()
 
-        if line:
+        if not line:
+            continue
+
+        key = line.lower()
+
+        if key not in seen:
+
+            seen.add(key)
             questions.append(line)
+
+        if len(questions) >= 10:
+            break
 
     return {
         "document_id": document_id,

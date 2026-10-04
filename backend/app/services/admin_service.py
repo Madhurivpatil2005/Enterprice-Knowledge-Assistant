@@ -2,7 +2,9 @@ from app.repositories.admin_repository import (
     find_all_users,
     find_user_by_email,
     update_user_role,
+    delete_user_by_email,
 )
+
 
 from app.services.audit_service import record_audit_log
 
@@ -144,3 +146,29 @@ def demote_user(
         ),
         "created_at": user["created_at"],
     }
+
+# ==================================================
+# DELETE USER
+# ==================================================
+
+def delete_user(
+    email: str,
+    admin_email: str,
+):
+
+    user = delete_user_by_email(
+        email
+    )
+
+    if user is None:
+        return None
+
+    record_audit_log(
+        user_email=admin_email,
+        action="USER_DELETED",
+        resource_type="user",
+        resource_id=str(user["_id"]),
+        details=f"Deleted user {email}",
+    )
+
+    return user

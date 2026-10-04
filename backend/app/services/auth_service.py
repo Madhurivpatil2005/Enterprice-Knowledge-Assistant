@@ -48,7 +48,16 @@ def login_user(email: str, password: str):
     }
 
 def get_user_profile(user: dict):
+
+    current_user = find_by_email(
+        user["email"]
+    )
+
     return {
-        "full_name": user["full_name"],
-        "email": user["email"],
+        "full_name": current_user["full_name"],
+        "email": current_user["email"],
+        "role": current_user.get(
+            "role",
+            "user"
+        ),
     }

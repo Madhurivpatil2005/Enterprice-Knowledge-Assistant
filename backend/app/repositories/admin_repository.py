@@ -11,6 +11,7 @@ users_collection = db["users"]
 # ==================================================
 
 def find_all_users():
+
     return list(
         users_collection.find(
             {},
@@ -28,7 +29,10 @@ def find_all_users():
 # GET USER
 # ==================================================
 
-def find_user_by_email(email: str):
+def find_user_by_email(
+    email: str,
+):
+
     return users_collection.find_one(
         {
             "email": email.lower(),
@@ -47,6 +51,7 @@ def update_user_role(
     email: str,
     role: str,
 ):
+
     return users_collection.find_one_and_update(
         {
             "email": email.lower(),
@@ -60,4 +65,22 @@ def update_user_role(
             "password": 0,
         },
         return_document=ReturnDocument.AFTER,
+    )
+
+
+# ==================================================
+# DELETE USER
+# ==================================================
+
+def delete_user_by_email(
+    email: str,
+):
+
+    return users_collection.find_one_and_delete(
+        {
+            "email": email.lower(),
+        },
+        projection={
+            "password": 0,
+        },
     )

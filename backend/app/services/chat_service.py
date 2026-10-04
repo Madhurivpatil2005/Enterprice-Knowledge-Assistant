@@ -1,12 +1,14 @@
 from app.search.search_service import search_documents
 from app.llm.prompt_builder import build_prompt
-from app.llm.gemini_client import ask_gemini
 from app.llm.title_generator import generate_title
+from app.llm.gemini_client import ask_ollama
 
 from app.services.message_service import (
     save_user_message,
     save_assistant_message,
 )
+
+from app.services.audit_service import record_audit_log
 
 from app.repositories.conversation_repository import (
     find_conversation_by_id,
@@ -23,20 +25,22 @@ def ask_question(
     # ------------------------------------------
     # Verify conversation exists
     # ------------------------------------------
+
     conversation = find_conversation_by_id(
         conversation_id,
         current_user["email"],
-
     )
 
-    # Conversation does not exist
     if conversation is None:
         return {
             "answer": "Conversation not found.",
             "sources": [],
         }
 
-    # Conversation belongs to another user
+    # ------------------------------------------
+    # Verify conversation belongs to user
+    # ------------------------------------------
+
     if conversation["user_email"] != current_user["email"]:
         return {
             "answer": "Unauthorized.",
@@ -46,6 +50,7 @@ def ask_question(
     # ------------------------------------------
     # Save user message
     # ------------------------------------------
+
     save_user_message(
         conversation_id,
         question,
@@ -54,23 +59,35 @@ def ask_question(
     # ------------------------------------------
     # Generate title only for first question
     # ------------------------------------------
+
     if conversation["title"] == "New Chat":
 
         print("Generating title...")
 
         try:
-          title = generate_title(question)
-          print("Generated title:", title)
+            title = generate_title(question)
+
+            print(
+                "Generated title:",
+                title,
+            )
 
         except Exception as e:
-           print("Title generation failed:", e)
-           title = (
+
+            print(
+                "Title generation failed:",
+                e,
+            )
+
+            title = (
                 question[:40] + "..."
                 if len(question) > 40
                 else question
-        )
+            )
 
-        print("Updating MongoDB title...")
+        print(
+            "Updating MongoDB title..."
+        )
 
         update_conversation_title(
             conversation_id,
@@ -78,10 +95,14 @@ def ask_question(
             current_user["email"],
         )
 
-        print("MongoDB title updated.")
+        print(
+            "MongoDB title updated."
+        )
+
     # ------------------------------------------
     # Search relevant document chunks
     # ------------------------------------------
+
     results = search_documents(
         question=question,
         user_email=current_user["email"],
@@ -90,9 +111,12 @@ def ask_question(
     # ------------------------------------------
     # No documents found
     # ------------------------------------------
+
     if not results:
 
-        answer = "You haven't uploaded any documents yet."
+        answer = (
+            "You haven't uploaded any documents yet."
+        )
 
         save_assistant_message(
             conversation_id,
@@ -105,6 +129,18 @@ def ask_question(
             current_user["email"],
         )
 
+        # --------------------------------------
+        # Record CHAT audit log
+        # --------------------------------------
+
+        record_audit_log(
+            user_email=current_user["email"],
+            action="CHAT",
+            resource_type="chat",
+            resource_id=conversation_id,
+            details="Chat request processed without document results",
+        )
+
         return {
             "answer": answer,
             "sources": [],
@@ -113,19 +149,22 @@ def ask_question(
     # ------------------------------------------
     # Build Prompt
     # ------------------------------------------
+
     prompt = build_prompt(
         question=question,
         chunks=results,
     )
 
     # ------------------------------------------
-    # Ask Gemini
+    # Ask Ollama
     # ------------------------------------------
-    answer = ask_gemini(prompt)
+
+    answer = ask_ollama(prompt)
 
     # ------------------------------------------
     # Prepare Source List
     # ------------------------------------------
+
     sources = []
 
     seen = set()
@@ -151,6 +190,7 @@ def ask_question(
     # ------------------------------------------
     # Save Assistant Response
     # ------------------------------------------
+
     save_assistant_message(
         conversation_id,
         answer,
@@ -160,14 +200,28 @@ def ask_question(
     # ------------------------------------------
     # Update Conversation Timestamp
     # ------------------------------------------
+
     update_conversation_timestamp(
         conversation_id,
         current_user["email"],
     )
 
     # ------------------------------------------
+    # Record CHAT Audit Log
+    # ------------------------------------------
+
+    record_audit_log(
+        user_email=current_user["email"],
+        action="CHAT",
+        resource_type="chat",
+        resource_id=conversation_id,
+        details="Chat request processed successfully",
+    )
+
+    # ------------------------------------------
     # Return Response
     # ------------------------------------------
+
     return {
         "answer": answer,
         "sources": sources,
